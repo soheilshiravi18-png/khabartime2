@@ -9,7 +9,6 @@ const CATEGORY_META = {
   dakheli:  { tagClass: 'tag-dakheli',  label: 'داخلی',   bg: 'var(--coral-tint)' },
 };
 
-// ترتیب نمایش در نوار کناری، برای هر خبری که هدلاین (هیرو) نشد
 const SIDE_ORDER = ['varzeshi', 'ejtemaei', 'dakheli', 'siasi'];
 
 function escapeHTML(str) {
@@ -30,10 +29,33 @@ function relativeTime(isoString) {
   return `${diffDay} روز پیش`;
 }
 
+// اگه آیتم عکس واقعی داشته باشه، style مربوط به background-image رو برمی‌گردونه؛
+// وگرنه رشته‌ی خالی، تا همون رنگ تینت پیش‌فرض دسته باقی بمونه.
+function imageStyle(item, fallbackBg) {
+  if (item && item.image_url) {
+    return `background-image:url('${item.image_url}');background-size:cover;background-position:center;`;
+  }
+  return `background:${fallbackBg};`;
+}
+
+function creditHTML(item) {
+  if (!item || !item.image_url || !item.image_credit) return '';
+  const credit = escapeHTML(item.image_credit);
+  const href = item.image_credit_url ? escapeHTML(item.image_credit_url) : '#';
+  return `<a href="${href}" target="_blank" rel="noopener" style="position:absolute;bottom:6px;left:8px;font-size:10px;color:rgba(255,255,255,0.75);background:rgba(0,0,0,0.35);padding:2px 6px;border-radius:3px;text-decoration:none;">عکس: ${credit}</a>`;
+}
+
 function renderHero(item, timeText) {
   const heroBlock = document.querySelector('.hero > div:first-child');
   if (!heroBlock || !item) return;
   const meta = CATEGORY_META[item.category_slug] || {};
+
+  const imgEl = heroBlock.querySelector('.hero-img');
+  if (imgEl) {
+    imgEl.setAttribute('style', `position:relative;${imageStyle(item, 'linear-gradient(155deg,var(--navy) 0%,#26365c 55%,var(--press-dark) 100%)')}`);
+    imgEl.innerHTML = creditHTML(item);
+  }
+
   const tagEl = heroBlock.querySelector('.tag');
   if (tagEl) {
     tagEl.className = `tag ${meta.tagClass || 'tag-siasi'}`;
@@ -75,7 +97,7 @@ function renderGrid(slug, item, timeText) {
   const meta = CATEGORY_META[slug] || {};
   grid.innerHTML = `
     <div>
-      <div class="card-img" style="background:${meta.bg || 'var(--navy-tint)'};"></div>
+      <div class="card-img" style="position:relative;${imageStyle(item, meta.bg || 'var(--navy-tint)')}">${creditHTML(item)}</div>
       <span class="tag ${meta.tagClass || ''}">${escapeHTML(item.category_fa || meta.label || '')}</span>
       <div class="card-title">${escapeHTML(item.title)}</div>
       <p class="card-excerpt">${escapeHTML(item.summary)}</p>
