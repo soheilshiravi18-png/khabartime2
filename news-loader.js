@@ -1,15 +1,26 @@
 // news-loader.js
-// این اسکریپت محتوای واقعی news/latest.json را جایگزین متن‌های نمونه سایت می‌کند.
-// اگر فایل پیدا نشود یا فرمتش خراب باشد، سایت به همان حالت نمونه فعلی باقی می‌ماند.
+// محتوای واقعی news/latest.json را جایگزین متن‌های نمونه سایت می‌کند.
+// این فایل حالا با «تعداد رو به رشد» خبر در هر دسته کار می‌کند (نه فقط یک خبر ثابت per دسته)،
+// چون ربات تلگرام هر خبر تازه را جلوی آرایه اضافه می‌کند (جدیدترین = news[0]).
 
 const CATEGORY_META = {
-  siasi:    { tagClass: 'tag-siasi',    label: 'سیاسی',   bg: 'var(--navy-tint)' },
-  varzeshi: { tagClass: 'tag-varzeshi', label: 'ورزشی',   bg: 'var(--green-tint)' },
-  ejtemaei: { tagClass: 'tag-ejtemaei', label: 'اجتماعی', bg: 'var(--gold-tint)' },
-  dakheli:  { tagClass: 'tag-dakheli',  label: 'داخلی',   bg: 'var(--coral-tint)' },
+  siasi:     { tagClass: 'tag-siasi',     label: 'سیاسی',            bg: 'var(--navy-tint)' },
+  varzeshi:  { tagClass: 'tag-varzeshi',  label: 'ورزشی',            bg: 'var(--green-tint)' },
+  ejtemaei:  { tagClass: 'tag-ejtemaei',  label: 'اجتماعی',          bg: 'var(--gold-tint)' },
+  dakheli:   { tagClass: 'tag-dakheli',   label: 'اقتصادی',          bg: 'var(--coral-tint)' },
+  khareji:   { tagClass: 'tag-khareji',   label: 'بین‌الملل',        bg: 'var(--blue-tint)' },
+  fanavari:  { tagClass: 'tag-fanavari',  label: 'فناوری',           bg: 'var(--teal-tint)' },
+  farhangi:  { tagClass: 'tag-farhangi',  label: 'فرهنگی و هنری',    bg: 'var(--purple-tint)' },
+  salamat:   { tagClass: 'tag-salamat',   label: 'سلامت',            bg: 'var(--rose-tint)' },
+  havades:   { tagClass: 'tag-havades',   label: 'حوادث',            bg: 'var(--orange-tint)' },
+  sayer:     { tagClass: 'tag-sayer',     label: 'سایر',             bg: 'var(--hair)' },
 };
 
-const SIDE_ORDER = ['varzeshi', 'ejtemaei', 'dakheli', 'siasi'];
+// ترتیب دسته‌هایی که در نوار کناری (side-list) اگر جای خالی باشد نمایش داده می‌شوند —
+// در عمل الان side-list دیگر به این ترتیب وابسته نیست (بر اساس تازگی پر می‌شود)، فقط برای fallback نگه داشته شده.
+const CARDS_PER_SECTION = 6;
+const SIDE_LIST_COUNT = 4;
+const TICKER_COUNT = 15;
 
 function escapeHTML(str) {
   const d = document.createElement('div');
@@ -29,8 +40,7 @@ function relativeTime(isoString) {
   return `${diffDay} روز پیش`;
 }
 
-// اگه آیتم عکس واقعی داشته باشه، style مربوط به background-image رو برمی‌گردونه؛
-// وگرنه رشته‌ی خالی، تا همون رنگ تینت پیش‌فرض دسته باقی بمونه.
+// عکس واقعی -> background-image؛ وگرنه رنگ تینت پیش‌فرض همان دسته
 function imageStyle(item, fallbackBg) {
   if (item && item.image_url) {
     return `background-image:url('${item.image_url}');background-size:cover;background-position:center;`;
@@ -45,7 +55,21 @@ function creditHTML(item) {
   return `<a href="${href}" target="_blank" rel="noopener" style="position:absolute;bottom:6px;left:8px;font-size:10px;color:rgba(255,255,255,0.75);background:rgba(0,0,0,0.35);padding:2px 6px;border-radius:3px;text-decoration:none;">عکس: ${credit}</a>`;
 }
 
-function renderHero(item, timeText) {
+// خبرهایی که واقعاً از تلگرام آمده‌اند source:'telegram' دارند.
+// خبرهای «سایتی که هنوز خبر واقعی نرسیده» (auto-generated) با یک نشان کوچک متمایز می‌شوند
+// تا با اخبار واقعی قاطی نشوند.
+function sourceBadgeHTML(item) {
+  if (item && item.source === 'auto-generated') {
+    return `<span style="font-size:10px;color:var(--ink-soft);border:1px solid var(--hair);border-radius:3px;padding:1px 6px;margin-inline-start:6px;">خودکار</span>`;
+  }
+  return '';
+}
+
+function itemTime(item) {
+  return item.published_at || item.generated_at || null;
+}
+
+function renderHero(item) {
   const heroBlock = document.querySelector('.hero > div:first-child');
   if (!heroBlock || !item) return;
   const meta = CATEGORY_META[item.category_slug] || {};
@@ -66,65 +90,81 @@ function renderHero(item, timeText) {
   const excerptEl = heroBlock.querySelector('.hero-excerpt');
   if (excerptEl) excerptEl.textContent = item.summary || '';
   const metaEl = heroBlock.querySelector('.hero-meta');
-  if (metaEl) metaEl.textContent = `${timeText} · گروه ${item.category_fa || meta.label || ''}`;
+  if (metaEl) metaEl.textContent = `${relativeTime(itemTime(item))} · گروه ${item.category_fa || meta.label || ''}`;
 }
 
-function renderSideList(items, timeText) {
+function renderSideList(items) {
   const sideList = document.querySelector('.side-list');
   if (!sideList) return;
   sideList.innerHTML = items.map(item => {
     const meta = CATEGORY_META[item.category_slug] || {};
     return `
       <div class="side-item">
-        <span class="tag ${meta.tagClass || ''}">${escapeHTML(item.category_fa || meta.label || '')}</span>
+        <span class="tag ${meta.tagClass || ''}">${escapeHTML(item.category_fa || meta.label || '')}</span>${sourceBadgeHTML(item)}
         <div class="side-title">${escapeHTML(item.title)}</div>
-        <div class="side-meta">${timeText}</div>
+        <div class="side-meta">${relativeTime(itemTime(item))}</div>
       </div>`;
   }).join('');
 }
 
-function renderTicker(allItems) {
+function renderTicker(items) {
   const tickerMove = document.querySelector('.ticker-move');
-  if (!tickerMove || allItems.length === 0) return;
-  tickerMove.innerHTML = allItems.map(item => `<span>${escapeHTML(item.title)}</span>`).join('');
+  if (!tickerMove || items.length === 0) return;
+  tickerMove.innerHTML = items.slice(0, TICKER_COUNT).map(item => `<span>${escapeHTML(item.title)}</span>`).join('');
 }
 
-function renderGrid(slug, item, timeText) {
+// حالا هر بخش (مثلاً «سیاسی») چند کارت آخرِ همان دسته را نشان می‌دهد، نه فقط یک خبر تکراری.
+function renderGrid(slug, items) {
   const section = document.getElementById(slug);
-  if (!section || !item) return; // بدون داده واقعی، گرید دست‌نخورده (نمونه) باقی می‌ماند
+  if (!section) return;
+
+  if (!items.length) {
+    // هیچ خبر واقعی‌ای در این دسته هنوز نیامده — کل بخش را مخفی می‌کنیم
+    // تا به‌جایش متن‌های نمونه‌ی همیشگی و ثابت نمایش داده نشوند.
+    section.style.display = 'none';
+    return;
+  }
+  section.style.display = '';
+
   const grid = section.querySelector('.card-grid');
   if (!grid) return;
   const meta = CATEGORY_META[slug] || {};
-  grid.innerHTML = `
+
+  grid.innerHTML = items.slice(0, CARDS_PER_SECTION).map(item => `
     <div>
       <div class="card-img" style="position:relative;${imageStyle(item, meta.bg || 'var(--navy-tint)')}">${creditHTML(item)}</div>
-      <span class="tag ${meta.tagClass || ''}">${escapeHTML(item.category_fa || meta.label || '')}</span>
+      <span class="tag ${meta.tagClass || ''}">${escapeHTML(item.category_fa || meta.label || '')}</span>${sourceBadgeHTML(item)}
       <div class="card-title">${escapeHTML(item.title)}</div>
       <p class="card-excerpt">${escapeHTML(item.summary)}</p>
-      <div class="card-meta">${timeText}</div>
-    </div>`;
+      <div class="card-meta">${relativeTime(itemTime(item))}</div>
+    </div>`).join('');
 }
 
 function populateSite(data) {
-  const news = Array.isArray(data.news) ? data.news : [];
-  if (news.length === 0) throw new Error('آرایه اخبار خالی است');
+  const rawNews = Array.isArray(data.news) ? data.news : [];
+  if (rawNews.length === 0) throw new Error('آرایه اخبار خالی است');
 
-  const timeText = relativeTime(data.generated_at);
-  const bySlug = {};
-  news.forEach(item => { bySlug[item.category_slug] = item; });
+  // مرتب‌سازی بر اساس تازگی (جدیدترین اول) — مستقل از ترتیبی که در فایل ذخیره شده
+  const news = [...rawNews].sort((a, b) => {
+    const ta = new Date(itemTime(a) || 0).getTime();
+    const tb = new Date(itemTime(b) || 0).getTime();
+    return tb - ta;
+  });
 
-  // هیرو: خبر سیاسی در اولویت است، وگرنه اولین خبر موجود
-  const heroItem = bySlug['siasi'] || news[0];
+  // هیرو: جدیدترین خبر سیاسی در اولویت است، وگرنه جدیدترین خبر کلی
+  const heroItem = news.find(item => item.category_slug === 'siasi') || news[0];
 
-  // نوار کناری: بقیه خبرها به ترتیب SIDE_ORDER (به جز آنکه هیرو شده)
-  const sideItems = SIDE_ORDER
-    .map(slug => bySlug[slug])
-    .filter(item => item && item !== heroItem);
+  // نوار کناری: جدیدترین خبرهای دیگر (از هر دسته‌ای)، به‌جز خودِ هیرو
+  const sideItems = news.filter(item => item !== heroItem).slice(0, SIDE_LIST_COUNT);
 
-  renderHero(heroItem, timeText);
-  renderSideList(sideItems, timeText);
+  renderHero(heroItem);
+  renderSideList(sideItems);
   renderTicker(news);
-  ['siasi', 'varzeshi', 'ejtemaei'].forEach(slug => renderGrid(slug, bySlug[slug], timeText));
+
+  Object.keys(CATEGORY_META).forEach(slug => {
+    const itemsForSlug = news.filter(item => item.category_slug === slug);
+    renderGrid(slug, itemsForSlug);
+  });
 }
 
 async function loadNews() {
@@ -133,9 +173,18 @@ async function loadNews() {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     populateSite(data);
+    const lastUpdateEl = document.getElementById('lastUpdate');
+    if (lastUpdateEl && data.generated_at) {
+      const d = new Date(data.generated_at);
+      if (!isNaN(d.getTime())) {
+        lastUpdateEl.textContent = d.toLocaleTimeString('fa-IR', { hour: '2-digit', minute: '2-digit' });
+      }
+    }
   } catch (err) {
     console.warn('بارگذاری news/latest.json ناموفق بود؛ متن‌های نمونه فعلی باقی می‌مانند:', err);
   }
 }
 
 loadNews();
+// هر ۶۰ ثانیه دوباره چک می‌کند تا اگر کاربر صفحه را باز نگه داشته، خبر تازه بدون رفرش دستی هم دیده شود.
+setInterval(loadNews, 60000);
