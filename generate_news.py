@@ -2,24 +2,33 @@ import os
 import sys
 import json
 import random
+import uuid
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from openai import OpenAI
 
 API_KEY = os.environ["GAPGPT_API_KEY"]
 client = OpenAI(base_url="https://api.gapgpt.app/v1", api_key=API_KEY)
 
 # کلید رایگان از pexels.com/api بگیر و به‌عنوان Secret با همین اسم اضافه کن.
-# اگه تعریف نشه، اسکریپت خطا نمی‌ده — فقط بدون عکس ادامه می‌ده (سایت به رنگ پس‌زمینه‌ی قبلی برمی‌گرده).
+# اگه تعریف نشه، اسکریپت خطا نمی‌ده — فقط بدون عکس ادامه می‌ده.
 PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
 
-# برای هر دسته، هم برچسب فارسی (برای نمایش) و هم یه عبارت جست‌وجوی انگلیسی
-# (برای پیدا کردن عکس مرتبط از Pexels — عکس‌ها بر اساس کلیدواژه‌ی انگلیسی بهتر پیدا می‌شن)
+# این اسکریپت فقط یک fallback است: اگر ربات تلگرام طی این چند ساعت اخیر خبر واقعی
+# نفرستاده باشد، چند خبر عمومی/غیرقابل‌استناد تولید می‌کند تا سایت کاملاً خالی نماند.
+# اگر خبر واقعی تازه (از ربات، source == "telegram") موجود باشد، این اسکریپت هیچ کاری
+# نمی‌کند و بدون خطا خارج می‌شود.
+FALLBACK_THRESHOLD_HOURS = float(os.environ.get("FALLBACK_THRESHOLD_HOURS", "6"))
+NEWS_FILE = "news/latest.json"
+MAX_NEWS_ITEMS = int(os.environ.get("MAX_WEBSITE_NEWS_ITEMS", "80"))
+
+# برای هر دسته، هم برچسب فارسی (برای نمایش) و هم یه عبارت جست‌وجوی انگلیسی برای Pexels.
+# این اسلاگ‌ها باید دقیقاً با CATEGORY_META در news-loader.js یکی باشند.
 CATEGORIES = {
     "siasi":    {"fa": "سیاسی", "image_query": "government politics building"},
     "varzeshi": {"fa": "ورزشی", "image_query": "sports stadium athlete"},
     "ejtemaei": {"fa": "اجتماعی", "image_query": "city street people community"},
-    "dakheli":  {"fa": "داخلی (اقتصاد و بازار)", "image_query": "finance economy market"},
+    "dakheli":  {"fa": "اقتصادی", "image_query": "finance economy market"},
 }
 
 SYSTEM_PROMPT = "تو یک خبرنگار حرفه‌ای فارسی‌زبان برای یک وب‌سایت خبری به نام «نبض خبر» هستی. لحن تو رسمی، خبری و بی‌طرف است."
@@ -31,15 +40,12 @@ def build_prompt(category_fa: str) -> str:
 خروجی فقط JSON با این ساختار دقیق باشه (بدون توضیح اضافه، بدون Markdown):
 {{
   "title": "عنوان خبر (یک جمله کامل و جذاب)",
-  "summary": "خلاصه یک خطی برای نمایش در کارت خبر",
-  "body": "متن کامل خبر در ۲ پاراگراف"
+  "summary": "خلاصه یک خطی برای نمایش در کارت خبر"
 }}
 """
 
 
 def fetch_stock_image(query_en: str):
-    """یه عکس واقعی و عمومی (نه مرتبط با یه رویداد ساختگی خاص) بر اساس موضوع دسته از Pexels می‌گیرد.
-    اگه کلید تنظیم نشده باشه یا درخواست fail بشه، None برمی‌گردونه (خبر بدون عکس ادامه پیدا می‌کنه)."""
     if not PEXELS_API_KEY:
         return None
     try:
@@ -84,54 +90,95 @@ def generate_for_category(slug: str, category_fa: str, image_query: str) -> dict
         print(f"  خروجی خام مدل برای دیباگ:\n{content}\n")
         raise e
 
-    data["category_slug"] = slug
-    data["category_fa"] = category_fa
-
     image = fetch_stock_image(image_query)
-    if image:
-        data["image_url"] = image["url"]
-        data["image_credit"] = image["photographer"]
-        data["image_credit_url"] = image["photographer_url"]
 
-    return data
+    return {
+        "id": str(uuid.uuid4()),
+        "title": data.get("title", ""),
+        "summary": data.get("summary", ""),
+        "category_slug": slug,
+        "category_fa": category_fa,
+        "image_url": image["url"] if image else None,
+        "image_credit": image["photographer"] if image else None,
+        "image_credit_url": image["photographer_url"] if image else None,
+        "source": "auto-generated",
+        "published_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def load_existing():
+    try:
+        with open(NEWS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data.get("news", []) if isinstance(data, dict) else []
+    except Exception:
+        return []
+
+
+def most_recent_real_news_time(existing_news):
+    times = []
+    for item in existing_news:
+        # آیتم‌های قدیمی که از این اسکریپت خودش ساخته شده‌اند (بدون source یا source == auto-generated)
+        # «واقعی» حساب نمی‌شوند — فقط source == "telegram" باعث توقف fallback می‌شود.
+        if item.get("source") != "telegram":
+            continue
+        ts = item.get("published_at")
+        if not ts:
+            continue
+        try:
+            times.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+        except Exception:
+            continue
+    return max(times) if times else None
 
 
 def main():
-    all_news = []
-    failures = []
+    existing_news = load_existing()
+    latest_real = most_recent_real_news_time(existing_news)
 
+    if latest_real is not None:
+        age_hours = (datetime.now(timezone.utc) - latest_real).total_seconds() / 3600
+        if age_hours < FALLBACK_THRESHOLD_HOURS:
+            print(
+                f"آخرین خبر واقعی از تلگرام {age_hours:.1f} ساعت پیش رسیده "
+                f"(آستانه: {FALLBACK_THRESHOLD_HOURS} ساعت) — نیازی به خبر جایگزین نیست. خارج می‌شویم."
+            )
+            return
+
+    print("خبر واقعی تازه‌ای از تلگرام پیدا نشد — در حال تولید چند خبر جایگزین (fallback)...")
+
+    new_items = []
+    failures = []
     for slug, meta in CATEGORIES.items():
         category_fa = meta["fa"]
         try:
             item = generate_for_category(slug, category_fa, meta["image_query"])
-            all_news.append(item)
+            new_items.append(item)
             has_img = "بله" if item.get("image_url") else "خیر"
-            print(f"✓ خبر دسته '{category_fa}' تولید شد (عکس: {has_img})")
+            print(f"✓ خبر جایگزین دسته '{category_fa}' تولید شد (عکس: {has_img})")
         except Exception as e:
             failures.append((category_fa, str(e)))
             print(f"✗ خطا در تولید خبر دسته '{category_fa}': {e}")
 
-    generated_at = datetime.now(timezone.utc).isoformat()
-    output = {"generated_at": generated_at, "news": all_news}
-
-    os.makedirs("news", exist_ok=True)
-
-    if not all_news:
-        print("\nهیچ خبری تولید نشد — news/latest.json دست‌نخورده باقی می‌ماند.")
-        print("جزئیات خطاها:")
+    if not new_items:
+        print("\nهیچ خبر جایگزینی تولید نشد — news/latest.json دست‌نخورده باقی می‌ماند.")
         for category_fa, err in failures:
             print(f"  - {category_fa}: {err}")
-        sys.exit(1)
+        sys.exit(1 if failures else 0)
 
-    with open("news/latest.json", "w", encoding="utf-8") as f:
+    # به آرایه‌ی موجود اضافه می‌شود، نه جایگزین آن — اخبار واقعیِ قبلی پاک نمی‌شوند.
+    combined = (new_items + existing_news)[:MAX_NEWS_ITEMS]
+    output = {"generated_at": datetime.now(timezone.utc).isoformat(), "news": combined}
+
+    os.makedirs("news", exist_ok=True)
+    with open(NEWS_FILE, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
     date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
     with open(f"news/archive_{date_str}.json", "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
 
-    print(f"\n{len(all_news)} خبر تولید و در news/latest.json ذخیره شد")
-
+    print(f"\n{len(new_items)} خبر جایگزین اضافه شد. مجموع اخبار سایت: {len(combined)}")
     if failures:
         print(f"\nتوجه: {len(failures)} دسته با خطا مواجه شد:")
         for category_fa, err in failures:
